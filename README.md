@@ -283,3 +283,45 @@ sudo grep 2100498 /var/log/suricata/fast.log
 | `requirements.txt` | Python dependency pin (`requests==2.28.1`) |
 | `.env.example` | Placeholder token, chat id, and optional log path |
 | `tests/test_alerts.py` | Unit tests for parsing and priority formatting |
+
+## DNS Filtering with Pi-hole
+
+Pi-hole runs on the same Raspberry Pi as Suricata and is the DNS resolver for the LAN.
+
+1. Pi-hole accepts plaintext queries on port 53. Names on the blocklist are answered in `NULL` mode, which is `0.0.0.0` for IPv4 and `::` for IPv6. Every other name is forwarded to Google DNS.
+2. Suricata on this host has DNS output enabled. Those lookups are appended to `/var/log/suricata/eve.json` with `event_type` `dns`. The agent in this repository still ignores that event type and only messages Telegram for alerts.
+3. A separate DGA hunter, `dga-hunter.service` from the repository `irugniM/dga-detection-engine`, changes the Pi-hole lists from Telegram. Confirm Block denies a domain with `pihole -b -q <domain>`. Whitelist removes it with `pihole -b -q --del <domain>`. On an older Pi-hole CLI the unblock falls back to `pihole -w`.
+4. `piguard.service` from this repository runs alongside the hunter. It does not edit the Pi-hole lists.
+
+The machine is a Raspberry Pi running Raspbian GNU/Linux 12 (bookworm), aarch64. Pi-hole v6 is installed (Core v6.4, FTL v6.5). Settings are in `/etc/pihole/pihole.toml`.
+
+| Setting | Value |
+| --- | --- |
+| Upstream DNS | `8.8.8.8` and `8.8.4.4` (Google) |
+| Listen | interface `eth0`, `listeningMode` `LOCAL`, port 53 UDP and TCP, IPv4 and IPv6 |
+| Web admin | ports 80 and 443 |
+| Blocking mode | `NULL` (blocked domains resolve to `0.0.0.0` / `::`) |
+| `bogusPriv` | `true` |
+| `domainNeeded` | `false` |
+| `blockESNI` | `true` |
+| DHCP | disabled; the router keeps DHCP |
+| Query logging | on, privacy level `0` (full logging) |
+| Query database | kept 91 days (`maxDBdays` = 91) |
+| Blocklist | one adlist, StevenBlack unified hosts (`https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts`), about 73,600 domains in gravity |
+| Domain list | 6 exact allowlist entries, no manual deny entries, single group `Default` |
+
+Pi-hole's DHCP server stays off. The router keeps handing out addresses. Set the DNS server in the router's DHCP settings to the Pi's LAN address, `<pi-lan-ip>`. Clients that accept that option send plaintext DNS to Pi-hole.
+
+Verify from the Pi, or from a client that uses it:
+
+```bash
+dig @<pi-lan-ip> <blocklisted-domain>
+nslookup <blocklisted-domain> <pi-lan-ip>
+pihole status
+pihole -q <domain>
+```
+
+A blocklisted name returns `0.0.0.0`. An AAAA lookup for the same name returns `::`. `pihole status` reports whether the resolver is listening. `pihole -q <domain>` shows which list matched the name.
+
+Clients that use encrypted DNS (DoH or DoT) bypass Pi-hole. The query never arrives on port 53, so Suricata cannot see the query name. Filtering and detection only cover plaintext DNS sent to the Pi.
+
